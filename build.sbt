@@ -7,3 +7,5 @@ scalaVersion := "2.9.1"
 resolvers += "Typesafe Repository" at "http://repo.typesafe.com/typesafe/releases/"
 
 libraryDependencies += "com.typesafe.akka" % "akka-actor" % "2.0.1"
+
+libraryDependencies += "com.rabbitmq" % "amqp-client" % "2.8.2"
