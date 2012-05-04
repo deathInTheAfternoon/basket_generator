@@ -6,9 +6,9 @@
  * 
  */
 
-import com.rabbitmq.client.Channel
 import akka.actor._
 import akka.routing.RoundRobinRouter
+import com.rabbitmq.client.{Connection, Channel}
 import com.typesafe.config.ConfigFactory
 
 object BasketGenerator extends App{
@@ -59,9 +59,19 @@ object BasketGenerator extends App{
    *
    **/
 
-  class Shop(noOfShoppers: Int, channel: Channel, Q: String, controller: ActorRef) extends Actor with ActorLogging {
+  class Shop extends Actor with ActorLogging {
+    val config = ConfigFactory.load()
+    val noOfShoppers = config.getInt("basketGenerator.noOfShoppers")
+    val queue = config.getString("basketGenerator.rabbitmq.queue")
+
+    // Set up RabbitMQ
+    val connection = RabbitMQConnection.getConnection()
+    val channel = connection.createChannel()
+    channel.queueDeclare(queue, false, false, false, null)
+
+    log.info("Simulating {} Shoppers. Sending baskets to Q={}", noOfShoppers, queue)
     // We round-robin start requests to each Shopper
-    val shopperRouter = context.actorOf(Props(new Shopper(channel, Q)).withRouter(RoundRobinRouter(noOfShoppers)), name = "shopperRouter")
+    val shopperRouter = context.actorOf(Props(new Shopper(channel, queue)).withRouter(RoundRobinRouter(noOfShoppers)), name = "shopperRouter")
     // Count number of shopper's leaving the store.
     var noOfShoppersDied: Int = _
 
@@ -72,43 +82,25 @@ object BasketGenerator extends App{
       case ShopperDied =>
         noOfShoppersDied += 1
         if (noOfShoppersDied == noOfShoppers) {
-          controller ! SimulationComplete
           context.stop(self)
+          channel.close()
+          connection.close()
+          context.system.shutdown()
+
         }
     }
   }
 
-  /*
-  * This is ugly. We pass in connection and channel because the Controller is best qualified to shutdown Rabbit client.
-  * However, there's nothing to prevent them being shutdown elsewhere.
-  * Infact, they are actively used elsewhere so it seems 'aneamic' to use them here!
-   */
-  class Controller(connection: com.rabbitmq.client.Connection, channel: com.rabbitmq.client.Channel) extends Actor with ActorLogging{
-    def receive = {
-      case SimulationComplete =>
-        log.info("Simulation Finished.")
-        channel.close()
-        connection.close()
-        // context is the current Actor and system returns the ActorSystem this Actor belongs to.
-        context.system.shutdown()
-    }
-  }
   def generate(){
     val config = ConfigFactory.load()
-    val noOfShoppers = config.getInt("basket_generator.noOfShoppers")
-    Console.printf("Generator simulating %s shoppers.", noOfShoppers)
 
-    // Set up RabbitMQ
-    val connection = RabbitMQConnection.getConnection()
-    val sendingChannel = connection.createChannel()
-    sendingChannel.queueDeclare("GeneratedBasketQ", false, false, false, null)
 
     val actorSystem = ActorSystem("BasketGeneratorSystem", config)
 
     // used to control shutdown of the system when simulation finishes.
-    val controller = actorSystem.actorOf(Props(new Controller(connection, sendingChannel)), name = "controller")
+    //val controller = actorSystem.actorOf(Props(new Controller(connection, sendingChannel)), name = "controller")
     // master controls the slaves/workers
-    val shop = actorSystem.actorOf(Props(new Shop(noOfShoppers, sendingChannel, "GeneratedBasketQ", controller)), name = "master")
+    val shop = actorSystem.actorOf(Props[Shop], name = "master")
 
     shop ! SimulationStart
   }
