@@ -1,4 +1,4 @@
-import java.sql.Connection
+import com.rabbitmq.client.{ConnectionFactory, Connection}
 
 /**
  * Created under license Apache 2.0
@@ -10,4 +10,15 @@ import java.sql.Connection
 
 object RabbitMQConnection {
   private val connection: Connection = null;
+
+  def getConnection(): Connection = {
+    connection match {
+      case null => {
+        val factory = new ConnectionFactory()
+        factory.setHost("localhost")
+        factory.newConnection()
+      }
+      case _ => connection
+    }
+  }
 }
