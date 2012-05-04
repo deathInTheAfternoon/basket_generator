@@ -8,6 +8,8 @@
 
 import akka.actor._
 import akka.routing.RoundRobinRouter
+import com.mongodb.casbah.commons.MongoDBObject
+import com.mongodb.casbah.{MongoCollection, MongoConnection, MongoDB}// MongoCollection is MT-safe so can be passed to Workers.
 import com.rabbitmq.client.{Connection, Channel}
 import com.typesafe.config.ConfigFactory
 
@@ -23,7 +25,7 @@ object BasketGenerator extends App{
   case object SimulationStart extends SimulatorMessage
   case object GoShop extends SimulatorMessage
   case object ShopperDied extends SimulatorMessage
-  akka.dispatch.MessageDispatcher
+
   class Shopper(channel: Channel, Q: String) extends Actor with ActorLogging{
     val myId: String = nextASCIIString(10)
 
@@ -60,24 +62,24 @@ object BasketGenerator extends App{
    **/
 
   class Shop extends Actor with ActorLogging {
-    val config = ConfigFactory.load()
-    val noOfShoppers = config.getInt("basketGenerator.noOfShoppers")
-    val queue = config.getString("basketGenerator.rabbitmq.queue")
+    private[this] var mongoConn: Option[MongoConnection] = None
+    private[this] var db: Option[MongoDB] = None
+    private[this] var coll: Option[MongoCollection] = None
 
-    // Set up RabbitMQ
-    val connection = RabbitMQConnection.getConnection()
-    val channel = connection.createChannel()
-    channel.queueDeclare(queue, false, false, false, null)
+    private[this] var conn: Option[com.rabbitmq.client.Connection] = None
+    private[this] var chan: Option[com.rabbitmq.client.Channel] = None
+    private[this] var noOfShoppers: Int = 0
+    private[this] var queue: String  = "BGTestQ"
 
     // We round-robin start requests to each Shopper
-    val shopperRouter = context.actorOf(Props(new Shopper(channel, queue)).withRouter(RoundRobinRouter(noOfShoppers)), name = "shopperRouter")
+    private var shopperRouter: Option[ActorRef] = None
     // Count number of shopper's leaving the store.
     var noOfShoppersDied: Int = _
 
     def receive = {
       case SimulationStart =>
         log.info("Start simulation of {} Shoppers. Pickup baskets at Q = {}", noOfShoppers, queue)
-        for (i <- 0 until noOfShoppers) shopperRouter ! GoShop
+        for (i <- 0 until noOfShoppers) shopperRouter.get ! GoShop
       case ShopperDied =>
         noOfShoppersDied += 1
         if (noOfShoppersDied == noOfShoppers) {
@@ -86,10 +88,32 @@ object BasketGenerator extends App{
         }
     }
 
+    // Called before Actor starts accepting messages.
+    override def preStart() = {
+      val config = ConfigFactory.load()
+      noOfShoppers = config.getInt("basketGenerator.noOfShoppers")
+      queue = config.getString("basketGenerator.rabbitmq.queue")
+
+      // Set up MongoDB
+      mongoConn = Some(MongoConnection())//todo: defaulting to localhost:27017
+      db = mongoConn map {c => c("BasketGenerator")}
+      coll = db map {col => col("BasketCollection")}
+      // todo: just a test
+      val stamp = MongoDBObject("today" -> "18:51", "name" -> "Naveen")
+      coll.get.save(stamp)
+      log.info("Connected to MongoDB!")
+
+      // Set up RabbitMQ
+      conn = Some(RabbitMQConnection.getConnection())
+      chan = conn map {c => c.createChannel()}
+      chan.get.queueDeclare(queue, false, false, false, null)
+      log.info("Connected to RabbitMQ!")
+      shopperRouter = Some(context.actorOf(Props(new Shopper(chan.get, queue)).withRouter(RoundRobinRouter(noOfShoppers)), name = "shopperRouter"))
+    }
     // Called when Actor terminates itself - having terminated its children.
     override def postStop() = {
-      channel.close()
-      connection.close()
+      chan.get.close()
+      conn.get.close()
     }
   }
 
