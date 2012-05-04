@@ -93,14 +93,8 @@ object BasketGenerator extends App{
 
   def generate(){
     val config = ConfigFactory.load()
-
-
     val actorSystem = ActorSystem("BasketGeneratorSystem", config)
-
-    // used to control shutdown of the system when simulation finishes.
-    //val controller = actorSystem.actorOf(Props(new Controller(connection, sendingChannel)), name = "controller")
-    // master controls the slaves/workers
-    val shop = actorSystem.actorOf(Props[Shop], name = "master")
+    val shop = actorSystem.actorOf(Props[Shop], name = "topshop")
 
     shop ! SimulationStart
   }
