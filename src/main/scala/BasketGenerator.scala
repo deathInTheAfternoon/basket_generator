@@ -69,7 +69,6 @@ object BasketGenerator extends App{
     val channel = connection.createChannel()
     channel.queueDeclare(queue, false, false, false, null)
 
-    log.info("Simulating {} Shoppers. Sending baskets to Q={}", noOfShoppers, queue)
     // We round-robin start requests to each Shopper
     val shopperRouter = context.actorOf(Props(new Shopper(channel, queue)).withRouter(RoundRobinRouter(noOfShoppers)), name = "shopperRouter")
     // Count number of shopper's leaving the store.
@@ -77,17 +76,20 @@ object BasketGenerator extends App{
 
     def receive = {
       case SimulationStart =>
-        log.info("Starting Simulation")
+        log.info("Start simulation of {} Shoppers. Pickup baskets at Q = {}", noOfShoppers, queue)
         for (i <- 0 until noOfShoppers) shopperRouter ! GoShop
       case ShopperDied =>
         noOfShoppersDied += 1
         if (noOfShoppersDied == noOfShoppers) {
-          context.stop(self)
-          channel.close()
-          connection.close()
+          // Ask the 'user' generator to shutdown all its children (including Shop).
           context.system.shutdown()
-
         }
+    }
+
+    // Called when Actor terminates itself - having terminated its children.
+    override def postStop() = {
+      channel.close()
+      connection.close()
     }
   }
 
