@@ -13,7 +13,7 @@ import com.mongodb.casbah.{MongoCollection, MongoConnection, MongoDB}
 import java.util.Date
 
 // MongoCollection is MT-safe so can be passed to Workers.
-import com.rabbitmq.client.{Connection, Channel}
+import com.rabbitmq.client.Channel
 import com.typesafe.config.ConfigFactory
 
 object BasketGenerator extends App{
@@ -40,8 +40,8 @@ object BasketGenerator extends App{
    * don't get the same Channel and start serialising again?
    * Hopefully, Akka 2.1 will bring full Camel migration which will be the recommended way to Q.
    *
-   * @param channel
-   * @param Q
+   * @param channel is the RabbitMQ Channel object
+   * @param Q is the name of the Rabbit queue.
    */
   class Shopper(channel: Channel, Q: String) extends Actor with ActorLogging{
     def receive = {
@@ -49,7 +49,7 @@ object BasketGenerator extends App{
         log.info("I'm Shopping ({})!", shopperId)
         // test message to Q
         val msg = ("Shopper " + shopperId + "Shopped at : " + System.currentTimeMillis());
-        channel.basicPublish("", Q, null, msg.getBytes());
+        channel.basicPublish("", Q, null, msg.getBytes);
         // todo: generate shopper id from database
         // todo: generate basket from database
         // terminate this shopper's stint
@@ -101,7 +101,7 @@ object BasketGenerator extends App{
     }
 
     // Called before Actor starts accepting messages.
-    override def preStart() = {
+    override def preStart() {
       val config = ConfigFactory.load()
       noOfShoppers = config.getInt("basketGenerator.noOfShoppers")
       noOfAkkaActors = config.getInt("basketGenerator.noOfAkkaActors")
@@ -124,7 +124,7 @@ object BasketGenerator extends App{
       shopperRouter = Some(context.actorOf(Props(new Shopper(chan.get, queue)).withRouter(RoundRobinRouter(noOfAkkaActors)), name = "shopperRouter"))
     }
     // Called when Actor terminates, having terminated its children.
-    override def postStop() = {
+    override def postStop() {
       // 'foreach' applies the function to the Options value if its non-empty (!= None).
 
       //Rabbit
