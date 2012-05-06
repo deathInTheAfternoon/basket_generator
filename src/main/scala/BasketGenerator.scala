@@ -8,9 +8,10 @@
 
 import akka.actor._
 import akka.routing.RoundRobinRouter
-import com.mongodb.casbah.commons.MongoDBObject
-import com.mongodb.casbah.{MongoCollection, MongoConnection, MongoDB}
+import com.mongodb.casbah.Imports._
 import java.util.Date
+import scala.None
+import scala.Predef._
 
 // MongoCollection is MT-safe so can be passed to Workers.
 import com.rabbitmq.client.Channel
@@ -42,18 +43,38 @@ object BasketGenerator extends App{
    *
    * @param channel is the RabbitMQ Channel object
    * @param Q is the name of the Rabbit queue.
+   * @param referenceDataCollection the MongoDB Collection which stores reference-data.
+   *
    */
-  class Shopper(channel: Channel, Q: String) extends Actor with ActorLogging{
+  class Shopper(channel: Option[Channel], Q: String, referenceDataCollection: Option[MongoCollection],
+                 logsCollection: Option[MongoCollection]) extends Actor with ActorLogging{
     def receive = {
       case GoShop(shopperId) =>
         log.info("I'm Shopping ({})!", shopperId)
+        // todo: just a test - we need to generate a basket full of random items and publish it.
+        val stamp = generateBasket().get
+        logsCollection.get.save(stamp)// log the basket we're about to Q.
+        println(stamp.toString)
         // test message to Q
         val msg = ("Shopper " + shopperId + "Shopped at : " + System.currentTimeMillis());
-        channel.basicPublish("", Q, null, msg.getBytes);
+        channel.get.basicPublish("", Q, null, msg.getBytes);
         // todo: generate shopper id from database
         // todo: generate basket from database
         // terminate this shopper's stint
         sender ! ShopperDied
+    }
+
+    def generateBasket(): Option[Map[String, AnyRef]] = {
+      // generate a random number between 1 and 5 for the number of items.
+      val noOfItems = util.Random.nextInt(5)
+      val builder = MongoDBObject.newBuilder
+      for (i <- 0 to noOfItems) {
+        builder += "sku" -> ("sku" + (util.Random.nextInt(4) + 1))
+      }
+      val query = builder.result()
+      val item: Option[DBObject] = referenceDataCollection.get.findOne(query)
+      println(item.get.get("description"))
+      item.map{x => Map("item1" -> x.get("description"), "item2" -> "Coke")}
     }
   }
 
@@ -67,7 +88,8 @@ object BasketGenerator extends App{
   class Shop extends Actor with ActorLogging {
     private[this] var mongoConn: Option[MongoConnection] = None
     private[this] var db: Option[MongoDB] = None
-    private[this] var coll: Option[MongoCollection] = None
+    private[this] var referenceDataCollection: Option[MongoCollection] = None
+    private[this] var logsCollection: Option[MongoCollection] = None
 
     private[this] var conn: Option[com.rabbitmq.client.Connection] = None
     private[this] var chan: Option[com.rabbitmq.client.Channel] = None
@@ -109,11 +131,16 @@ object BasketGenerator extends App{
 
       // Set up MongoDB
       mongoConn = Some(MongoConnection())//todo: defaulting to localhost:27017
-      db = mongoConn map {c => c("BasketGenerator")}
-      coll = db map {col => col("BasketCollection")}
+      db = mongoConn map {c => c(config.getString("basketGenerator.mongodb.database"))}
+      // MongoCollection is MT-safe
+      // (See: https://github.com/typesafehub/webwords/blob/heroku-devcenter/common/src/main/scala/com/typesafe/webwords/common/IndexStorageActor.scala).
+      referenceDataCollection = db map {col => col(config.getString("basketGenerator.mongodb.referenceDataCollection"))}
+      logsCollection = db map {col => col(config.getString("basketGenerator.mongodb.logsCollection"))}
+
       // todo: just a test
       val stamp = MongoDBObject("today" -> new Date().toString, "name" -> "Naveen")
-      coll.get.save(stamp)
+      logsCollection.get.save(stamp)
+
       log.info("Connected to MongoDB!")
 
       // Set up RabbitMQ
@@ -121,7 +148,7 @@ object BasketGenerator extends App{
       chan = conn map {c => c.createChannel()}
       chan.get.queueDeclare(queue, false, false, false, null)
       log.info("Connected to RabbitMQ!")
-      shopperRouter = Some(context.actorOf(Props(new Shopper(chan.get, queue)).withRouter(RoundRobinRouter(noOfAkkaActors)), name = "shopperRouter"))
+      shopperRouter = Some(context.actorOf(Props(new Shopper(chan, queue, referenceDataCollection, logsCollection)).withRouter(RoundRobinRouter(noOfAkkaActors)), name = "shopperRouter"))
     }
     // Called when Actor terminates, having terminated its children.
     override def postStop() {
@@ -145,5 +172,13 @@ object BasketGenerator extends App{
     val shop = actorSystem.actorOf(Props[Shop], name = "topshop")
 
     shop ! SimulationStart
+  }
+
+  /**
+   * Nice way to encapsulate access to configuration data.
+   */
+  //todo: use this idiom!!
+  object Config {
+    val RABBITMQ_HOST = ConfigFactory.load().getString("basketGenerator.rabbitmq.queue")
   }
 }
