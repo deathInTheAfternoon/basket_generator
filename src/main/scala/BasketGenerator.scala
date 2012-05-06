@@ -9,7 +9,10 @@
 import akka.actor._
 import akka.routing.RoundRobinRouter
 import com.mongodb.casbah.commons.MongoDBObject
-import com.mongodb.casbah.{MongoCollection, MongoConnection, MongoDB}// MongoCollection is MT-safe so can be passed to Workers.
+import com.mongodb.casbah.{MongoCollection, MongoConnection, MongoDB}
+import java.util.Date
+
+// MongoCollection is MT-safe so can be passed to Workers.
 import com.rabbitmq.client.{Connection, Channel}
 import com.typesafe.config.ConfigFactory
 
@@ -23,29 +26,34 @@ object BasketGenerator extends App{
   //case classes/objects can be used for pattern matching, have compiler generated toString, equality, constructor methods.
   case object SimulationComplete extends SimulatorMessage
   case object SimulationStart extends SimulatorMessage
-  case object GoShop extends SimulatorMessage
+  case class GoShop(shopperId: String) extends SimulatorMessage
   case object ShopperDied extends SimulatorMessage
 
+  /** A ghost which occupies the store. It is given an Id by the Master when told to Shop. It publishes receipts on
+   * the Q.
+   *
+   * The current problem is that a single Channel serialzes requests (1 thd at a time is able to run commands).
+   * This will become a bottleneck if many Actors are created. The alternative (as suggested) is run a Channel per-thd.
+   * Does it make sense to implement this as a Channel per Event-Based Actor?
+   * What happens if there are many Actors, in this case?
+   * Yet another way might be to have a tuneable pool of Channels? But then how do we ensure two EBA's on the same thd
+   * don't get the same Channel and start serialising again?
+   * Hopefully, Akka 2.1 will bring full Camel migration which will be the recommended way to Q.
+   *
+   * @param channel
+   * @param Q
+   */
   class Shopper(channel: Channel, Q: String) extends Actor with ActorLogging{
-    val myId: String = nextASCIIString(10)
-
     def receive = {
-      case GoShop =>
-        log.info("I'm Shopping ({})!", myId)
+      case GoShop(shopperId) =>
+        log.info("I'm Shopping ({})!", shopperId)
         // test message to Q
-        val msg = ("Shopped at : " + System.currentTimeMillis());
+        val msg = ("Shopper " + shopperId + "Shopped at : " + System.currentTimeMillis());
         channel.basicPublish("", Q, null, msg.getBytes());
         // todo: generate shopper id from database
         // todo: generate basket from database
         // terminate this shopper's stint
         sender ! ShopperDied
-    }
-
-    def nextASCIIString(length: Int) = {
-      val (min, max) = (33, 126)
-      def nextDigit = util.Random.nextInt(max - min) + min
-
-      new String(Array.fill(length)(nextDigit.toByte), "ASCII")
     }
   }
 
@@ -53,11 +61,6 @@ object BasketGenerator extends App{
    *
    * SimulationStart event - begins Shopper activity, is sent from Controller.
    * ShopperDied event - sent from Shopper to indicate they're leaving the store.
-   *
-   * @param noOfShoppers
-   * @param channel
-   * @param Q
-   * @param controller
    *
    **/
 
@@ -68,7 +71,8 @@ object BasketGenerator extends App{
 
     private[this] var conn: Option[com.rabbitmq.client.Connection] = None
     private[this] var chan: Option[com.rabbitmq.client.Channel] = None
-    private[this] var noOfShoppers: Int = 0
+    private[this] var noOfAkkaActors: Int = _
+    private[this] var noOfShoppers: Int = _
     private[this] var queue: String  = "BGTestQ"
 
     // We round-robin start requests to each Shopper
@@ -78,20 +82,29 @@ object BasketGenerator extends App{
 
     def receive = {
       case SimulationStart =>
-        log.info("Start simulation of {} Shoppers. Pickup baskets at Q = {}", noOfShoppers, queue)
-        for (i <- 0 until noOfShoppers) shopperRouter.get ! GoShop
+        log.info("Start simulation of {} Shoppers using {} AkkaActors. Pickup baskets at Q = {}", noOfShoppers, noOfAkkaActors, queue)
+        for (i <- 0 until noOfShoppers) shopperRouter.get ! GoShop(nextASCIIString(20))
       case ShopperDied =>
         noOfShoppersDied += 1
         if (noOfShoppersDied == noOfShoppers) {
+          log.info("Finished simulation of {} Shoppers!", noOfShoppers)
           // Ask the 'user' generator to shutdown all its children (including Shop).
           context.system.shutdown()
         }
+    }
+
+    def nextASCIIString(length: Int) = {
+      val (min, max) = (33, 126)
+      def nextDigit = util.Random.nextInt(max - min) + min
+
+      new String(Array.fill(length)(nextDigit.toByte), "ASCII")
     }
 
     // Called before Actor starts accepting messages.
     override def preStart() = {
       val config = ConfigFactory.load()
       noOfShoppers = config.getInt("basketGenerator.noOfShoppers")
+      noOfAkkaActors = config.getInt("basketGenerator.noOfAkkaActors")
       queue = config.getString("basketGenerator.rabbitmq.queue")
 
       // Set up MongoDB
@@ -99,7 +112,7 @@ object BasketGenerator extends App{
       db = mongoConn map {c => c("BasketGenerator")}
       coll = db map {col => col("BasketCollection")}
       // todo: just a test
-      val stamp = MongoDBObject("today" -> "18:51", "name" -> "Naveen")
+      val stamp = MongoDBObject("today" -> new Date().toString, "name" -> "Naveen")
       coll.get.save(stamp)
       log.info("Connected to MongoDB!")
 
@@ -108,12 +121,21 @@ object BasketGenerator extends App{
       chan = conn map {c => c.createChannel()}
       chan.get.queueDeclare(queue, false, false, false, null)
       log.info("Connected to RabbitMQ!")
-      shopperRouter = Some(context.actorOf(Props(new Shopper(chan.get, queue)).withRouter(RoundRobinRouter(noOfShoppers)), name = "shopperRouter"))
+      shopperRouter = Some(context.actorOf(Props(new Shopper(chan.get, queue)).withRouter(RoundRobinRouter(noOfAkkaActors)), name = "shopperRouter"))
     }
-    // Called when Actor terminates itself - having terminated its children.
+    // Called when Actor terminates, having terminated its children.
     override def postStop() = {
-      chan.get.close()
-      conn.get.close()
+      // 'foreach' applies the function to the Options value if its non-empty (!= None).
+
+      //Rabbit
+      chan foreach (ch => ch.close()) //Good practice! But not necessary if the connection is being closed.
+      conn foreach (co => co.close())
+      //Mongo
+      mongoConn foreach(c => c.close())
+      // Let's be really neat!
+      chan = None
+      conn = None
+      mongoConn = None
     }
   }
 
