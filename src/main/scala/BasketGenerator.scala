@@ -49,23 +49,22 @@ object BasketGenerator extends App{
    *
    */
   class Shopper(channel: Option[Channel], Q: String, referenceDataCollection: Option[MongoCollection],
-                 logsCollection: Option[MongoCollection]) extends Actor with ActorLogging{
+                 noOfSKUs: Int, logsCollection: Option[MongoCollection]) extends Actor with ActorLogging{   //todo: is there a better way to pass noOfSKus and other constants?
     def receive = {
       case GoShop(shopperId) =>
-        // todo: just a test - we need to generate a basket full of random items and publish it.
         val basket = generateBasket(shopperId)
         logsCollection.get.save(basket)// log the basket we're about to Q.
 
         // We call .toMap to convert from Mutable to Immutable map.
         channel.get.basicPublish("", Q, null, JSONObject(basket).toString().getBytes);
-        // todo: generate shopper id from database
-        // todo: generate basket from database
+        log.info(JSONObject(basket).toString())
         // terminate this shopper's stint
         sender ! ShopperDied
     }
 
     /** Generates a randomised basket of shopping.
-     * This method generates a basket of shopping with a random number of items and a random selection of products.
+     * This method generates a basket of shopping with a random number of items and a random selection of products. It
+     * assumes the data source contains SKUs with a seqId: Int. The seqId is used to lookup a SKU given a random number.
      *
      * @param forShopper is the id for the person who owns the basket.
      * @return A map of skuId->descriptions as well as id->forShopper - in no particular order.
@@ -77,17 +76,17 @@ object BasketGenerator extends App{
       // generating list of N skus.
       var skuList = List.empty[Any]
       for (i <- 0 to N) {
-        //todo: we are assuming skus have form 'skuN'. In fact, they should come from reference data.
-        skuList ++= List("sku" + (util.Random.nextInt(4) + 1))
+        skuList ++= List(util.Random.nextInt(noOfSKUs))
       }
 
-      val query: MongoDBObject = "sku" $in (skuList) //note, each basket will contain a sku once only.
+      val query: MongoDBObject = "seqId" $in (skuList) //note, each basket will contain a sku once only.
+
       // Fire the query to get back the full item details from the ref data, for the receipt.
       var itemDetails = new HashMap[String, AnyRef]
       var itemLine = 0
       for ( x <- referenceDataCollection.get.find(query))
       {
-        itemDetails += ("item" + itemLine) -> x.get("description")
+        itemDetails += ("item" + itemLine) -> x.get("NAME")
         itemLine += 1
       }
       // Add meta-data
@@ -120,11 +119,12 @@ object BasketGenerator extends App{
     private var shopperRouter: Option[ActorRef] = None
     // Count number of shopper's leaving the store.
     var noOfShoppersDied: Int = _
+    var noOfSKUs: Int = _ // range for random numbers used to generate skus.
 
     def receive = {
       case SimulationStart =>
         log.info("Start simulation of {} Shoppers using {} AkkaActors. Pickup baskets at Q = {}", noOfShoppers, noOfAkkaActors, queue)
-        for (i <- 0 until noOfShoppers) shopperRouter.get ! GoShop(nextASCIIString(20))
+        for (i <- 0 until noOfShoppers) shopperRouter.get ! GoShop(nextASCIIString(20))  // todo: generate shopper id from database
       case ShopperDied =>
         noOfShoppersDied += 1
         if (noOfShoppersDied == noOfShoppers) {
@@ -143,31 +143,30 @@ object BasketGenerator extends App{
 
     // Called before Actor starts accepting messages.
     override def preStart() {
-      val config = ConfigFactory.load()
-      noOfShoppers = config.getInt("basketGenerator.noOfShoppers")
-      noOfAkkaActors = config.getInt("basketGenerator.noOfAkkaActors")
-      queue = config.getString("basketGenerator.rabbitmq.queue")
+      noOfShoppers = Config.GENERATOR_NO_OF_SHOPPERS
+      noOfAkkaActors = Config.GENERATOR_NO_OF_AKKA_ACTORS
+      queue = Config.RABBITMQ_QNAME
 
       // Set up MongoDB
-      mongoConn = Some(MongoConnection())//todo: defaulting to localhost:27017
-      db = mongoConn map {c => c(config.getString("basketGenerator.mongodb.database"))}
+      mongoConn = Some(MongoConnection(Config.MONGODB_HOST, Config.MONGODB_PORT))
+      db = mongoConn map {c => c(Config.MONGODB_DATABASE)}
       // MongoCollection is MT-safe
       // (See: https://github.com/typesafehub/webwords/blob/heroku-devcenter/common/src/main/scala/com/typesafe/webwords/common/IndexStorageActor.scala).
-      referenceDataCollection = db map {col => col(config.getString("basketGenerator.mongodb.referenceDataCollection"))}
-      logsCollection = db map {col => col(config.getString("basketGenerator.mongodb.logsCollection"))}
-
-      // todo: just a test
-      val stamp = MongoDBObject("today" -> new Date().toString, "name" -> "Naveen")
-      logsCollection.get.save(stamp)
-
+      referenceDataCollection = db map {col => col(Config.GENERATOR_REF_DATA_COLLECTION)}
+      logsCollection = db map {col => col(Config.GENERATOR_LOGS_COLLECTION)}
       log.info("Connected to MongoDB!")
+      // log start of activity
+      val stamp = MongoDBObject("date" -> new Date().toString, "event" -> "Test Run!")
+      logsCollection.get.save(stamp)
+      // capture total number of SKUs.
+      noOfSKUs = referenceDataCollection.get.find(MongoDBObject("domainRefType" -> "SKU")).count
 
       // Set up RabbitMQ
       conn = Some(RabbitMQConnection.getConnection())
       chan = conn map {c => c.createChannel()}
       chan.get.queueDeclare(queue, false, false, false, null)
       log.info("Connected to RabbitMQ!")
-      shopperRouter = Some(context.actorOf(Props(new Shopper(chan, queue, referenceDataCollection, logsCollection)).withRouter(RoundRobinRouter(noOfAkkaActors)), name = "shopperRouter"))
+      shopperRouter = Some(context.actorOf(Props(new Shopper(chan, queue, referenceDataCollection, noOfSKUs, logsCollection)).withRouter(RoundRobinRouter(noOfAkkaActors)), name = "shopperRouter"))
     }
     // Called when Actor terminates, having terminated its children.
     override def postStop() {
@@ -198,6 +197,14 @@ object BasketGenerator extends App{
    */
   //todo: use this idiom!!
   object Config {
+    val MONGODB_HOST = ConfigFactory.load().getString("basketGenerator.mongodb.host")
+    val MONGODB_PORT = ConfigFactory.load().getInt("basketGenerator.mongodb.port")
+    val MONGODB_DATABASE = ConfigFactory.load().getString("basketGenerator.mongodb.database")
     val RABBITMQ_HOST = ConfigFactory.load().getString("basketGenerator.rabbitmq.queue")
+    val RABBITMQ_QNAME = ConfigFactory.load().getString("basketGenerator.rabbitmq.queue")
+    val GENERATOR_NO_OF_AKKA_ACTORS = ConfigFactory.load().getInt("basketGenerator.noOfAkkaActors")
+    val GENERATOR_NO_OF_SHOPPERS = ConfigFactory.load().getInt("basketGenerator.noOfShoppers")
+    val GENERATOR_REF_DATA_COLLECTION = ConfigFactory.load().getString("basketGenerator.mongodb.referenceDataCollection")
+    val GENERATOR_LOGS_COLLECTION = ConfigFactory.load().getString("basketGenerator.mongodb.logsCollection")
   }
 }
