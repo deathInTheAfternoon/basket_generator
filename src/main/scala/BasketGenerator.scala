@@ -8,10 +8,12 @@
 
 import akka.actor._
 import akka.routing.RoundRobinRouter
+import collection.mutable.HashMap
 import com.mongodb.casbah.Imports._
 import java.util.Date
 import scala.None
 import scala.Predef._
+import scala.util.parsing.json._
 
 // MongoCollection is MT-safe so can be passed to Workers.
 import com.rabbitmq.client.Channel
@@ -50,31 +52,48 @@ object BasketGenerator extends App{
                  logsCollection: Option[MongoCollection]) extends Actor with ActorLogging{
     def receive = {
       case GoShop(shopperId) =>
-        log.info("I'm Shopping ({})!", shopperId)
         // todo: just a test - we need to generate a basket full of random items and publish it.
-        val stamp = generateBasket().get
-        logsCollection.get.save(stamp)// log the basket we're about to Q.
-        println(stamp.toString)
-        // test message to Q
-        val msg = ("Shopper " + shopperId + "Shopped at : " + System.currentTimeMillis());
-        channel.get.basicPublish("", Q, null, msg.getBytes);
+        val basket = generateBasket(shopperId)
+        logsCollection.get.save(basket)// log the basket we're about to Q.
+
+        // We call .toMap to convert from Mutable to Immutable map.
+        channel.get.basicPublish("", Q, null, JSONObject(basket).toString().getBytes);
         // todo: generate shopper id from database
         // todo: generate basket from database
         // terminate this shopper's stint
         sender ! ShopperDied
     }
 
-    def generateBasket(): Option[Map[String, AnyRef]] = {
-      // generate a random number between 1 and 5 for the number of items.
-      val noOfItems = util.Random.nextInt(5)
-      val builder = MongoDBObject.newBuilder
-      for (i <- 0 to noOfItems) {
-        builder += "sku" -> ("sku" + (util.Random.nextInt(4) + 1))
+    /** Generates a randomised basket of shopping.
+     * This method generates a basket of shopping with a random number of items and a random selection of products.
+     *
+     * @param forShopper is the id for the person who owns the basket.
+     * @return A map of skuId->descriptions as well as id->forShopper - in no particular order.
+     */
+    def generateBasket(forShopper: String): Map[String, AnyRef] = {
+      // Building query: { sku: {$in: [sku1,...skuN } }, where N is random number
+      // generating random N between 1 and 5.
+      val N = util.Random.nextInt(5)
+      // generating list of N skus.
+      var skuList = List.empty[Any]
+      for (i <- 0 to N) {
+        //todo: we are assuming skus have form 'skuN'. In fact, they should come from reference data.
+        skuList ++= List("sku" + (util.Random.nextInt(4) + 1))
       }
-      val query = builder.result()
-      val item: Option[DBObject] = referenceDataCollection.get.findOne(query)
-      println(item.get.get("description"))
-      item.map{x => Map("item1" -> x.get("description"), "item2" -> "Coke")}
+
+      val query: MongoDBObject = "sku" $in (skuList) //note, each basket will contain a sku once only.
+      // Fire the query to get back the full item details from the ref data, for the receipt.
+      var itemDetails = new HashMap[String, AnyRef]
+      var itemLine = 0
+      for ( x <- referenceDataCollection.get.find(query))
+      {
+        itemDetails += ("item" + itemLine) -> x.get("description")
+        itemLine += 1
+      }
+      // Add meta-data
+      itemDetails += ("id" -> forShopper)
+      itemDetails += ("date" -> new Date().toString)
+      itemDetails.toMap
     }
   }
 
