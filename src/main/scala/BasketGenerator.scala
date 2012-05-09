@@ -10,13 +10,13 @@ import akka.actor._
 import akka.routing.RoundRobinRouter
 import collection.mutable.HashMap
 import com.mongodb.casbah.Imports._
+import com.rabbitmq.client.{AMQP, Channel}
 import java.util.Date
 import scala.None
 import scala.Predef._
 import scala.util.parsing.json._
 
 // MongoCollection is MT-safe so can be passed to Workers.
-import com.rabbitmq.client.Channel
 import com.typesafe.config.ConfigFactory
 
 object BasketGenerator extends App{
@@ -56,7 +56,10 @@ object BasketGenerator extends App{
         logsCollection.get.save(basket)// log the basket we're about to Q.
 
         // We call .toMap to convert from Mutable to Immutable map.
-        channel.get.basicPublish("", Q, null, JSONObject(basket).toString().getBytes);
+        val builder = new AMQP.BasicProperties.Builder
+        // It's important to set the contentType property - otherwise node-amqp will see bytes instead of JSON.
+        channel.get.basicPublish("", Q, builder.contentType("application/json").build(), JSONObject(basket).toString().getBytes);
+
         log.info(JSONObject(basket).toString())
         // terminate this shopper's stint
         sender ! ShopperDied
@@ -195,7 +198,6 @@ object BasketGenerator extends App{
   /**
    * Nice way to encapsulate access to configuration data.
    */
-  //todo: use this idiom!!
   object Config {
     val MONGODB_HOST = ConfigFactory.load().getString("basketGenerator.mongodb.host")
     val MONGODB_PORT = ConfigFactory.load().getInt("basketGenerator.mongodb.port")
