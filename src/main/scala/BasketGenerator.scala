@@ -19,6 +19,10 @@ import scala.util.parsing.json._
 // MongoCollection is MT-safe so can be passed to Workers.
 import com.typesafe.config.ConfigFactory
 
+//todo: Add progress Shopper start, stop and overall progress reporting messages for client.
+//todo: Wrap qu stuff in a function object so it's encapsulated and can be called from anywhere. But...do functions have state?
+//todo: We need to create the Event Engine which feeds node.js.
+//todo: Build Actors for repository and integration (MQ).
 object BasketGenerator extends App{
   generate()
 
@@ -43,23 +47,18 @@ object BasketGenerator extends App{
    * don't get the same Channel and start serialising again?
    * Hopefully, Akka 2.1 will bring full Camel migration which will be the recommended way to Q.
    *
-   * @param channel is the RabbitMQ Channel object
-   * @param Q is the name of the Rabbit queue.
    * @param referenceDataCollection the MongoDB Collection which stores reference-data.
    *
    */
-  class Shopper(channel: Option[Channel], Q: String, referenceDataCollection: Option[MongoCollection],
-                 noOfSKUs: Int, logsCollection: Option[MongoCollection]) extends Actor with ActorLogging{   //todo: is there a better way to pass noOfSKus and other constants?
+  class Shopper(referenceDataCollection: Option[MongoCollection],
+                 noOfSKUs: Int, logsCollection: Option[MongoCollection], integrationLayer: ActorRef) extends Actor with ActorLogging{   //todo: is there a better way to pass noOfSKus and other constants?
+
     def receive = {
       case GoShop(shopperId) =>
         val basket = generateBasket(shopperId)
         logsCollection.get.save(basket)// log the basket we're about to Q.
-
-        // We call .toMap to convert from Mutable to Immutable map.
-        val builder = new AMQP.BasicProperties.Builder
-        // It's important to set the contentType property - otherwise node-amqp will see bytes instead of JSON.
-        channel.get.basicPublish("", Q, builder.contentType("application/json").build(), JSONObject(basket).toString().getBytes);
-
+        // RabbitMQ
+        integrationLayer ! BusinessEvent(basket)
         log.info(JSONObject(basket).toString())
         // terminate this shopper's stint
         sender ! ShopperDied
@@ -106,17 +105,15 @@ object BasketGenerator extends App{
    *
    **/
 
-  class Shop extends Actor with ActorLogging {
+  class Shop(integrationLayer: ActorRef) extends Actor with ActorLogging {
     private[this] var mongoConn: Option[MongoConnection] = None
     private[this] var db: Option[MongoDB] = None
     private[this] var referenceDataCollection: Option[MongoCollection] = None
     private[this] var logsCollection: Option[MongoCollection] = None
 
-    private[this] var conn: Option[com.rabbitmq.client.Connection] = None
-    private[this] var chan: Option[com.rabbitmq.client.Channel] = None
     private[this] var noOfAkkaActors: Int = _
     private[this] var noOfShoppers: Int = _
-    private[this] var queue: String  = "BGTestQ"
+    private[this] var routingKeyBusiness: String  = "BGTestQ"
 
     // We round-robin start requests to each Shopper
     private var shopperRouter: Option[ActorRef] = None
@@ -126,7 +123,7 @@ object BasketGenerator extends App{
 
     def receive = {
       case SimulationStart =>
-        log.info("Start simulation of {} Shoppers using {} AkkaActors. Pickup baskets at Q = {}", noOfShoppers, noOfAkkaActors, queue)
+        log.info("Start simulation of {} Shoppers using {} AkkaActors. Pickup baskets at Q = {}", noOfShoppers, noOfAkkaActors, routingKeyBusiness)
         for (i <- 0 until noOfShoppers) shopperRouter.get ! GoShop(nextASCIIString(20))  // todo: generate shopper id from database
       case ShopperDied =>
         noOfShoppersDied += 1
@@ -148,7 +145,7 @@ object BasketGenerator extends App{
     override def preStart() {
       noOfShoppers = Config.GENERATOR_NO_OF_SHOPPERS
       noOfAkkaActors = Config.GENERATOR_NO_OF_AKKA_ACTORS
-      queue = Config.RABBITMQ_QNAME
+      routingKeyBusiness = Config.RABBITMQ_ROUTINGKEY_BUSINESS
 
       // Set up MongoDB
       mongoConn = Some(MongoConnection(Config.MONGODB_HOST, Config.MONGODB_PORT))
@@ -164,25 +161,15 @@ object BasketGenerator extends App{
       // capture total number of SKUs.
       noOfSKUs = referenceDataCollection.get.find(MongoDBObject("domainRefType" -> "SKU")).count
 
-      // Set up RabbitMQ
-      conn = Some(RabbitMQConnection.getConnection())
-      chan = conn map {c => c.createChannel()}
-      chan.get.queueDeclare(queue, false, false, false, null)
-      log.info("Connected to RabbitMQ!")
-      shopperRouter = Some(context.actorOf(Props(new Shopper(chan, queue, referenceDataCollection, noOfSKUs, logsCollection)).withRouter(RoundRobinRouter(noOfAkkaActors)), name = "shopperRouter"))
+      shopperRouter = Some(context.actorOf(Props(new Shopper(referenceDataCollection, noOfSKUs, logsCollection, integrationLayer)).withRouter(RoundRobinRouter(noOfAkkaActors)), name = "shopperRouter"))
     }
     // Called when Actor terminates, having terminated its children.
     override def postStop() {
       // 'foreach' applies the function to the Options value if its non-empty (!= None).
 
-      //Rabbit
-      chan foreach (ch => ch.close()) //Good practice! But not necessary if the connection is being closed.
-      conn foreach (co => co.close())
       //Mongo
       mongoConn foreach(c => c.close())
       // Let's be really neat!
-      chan = None
-      conn = None
       mongoConn = None
     }
   }
@@ -190,7 +177,8 @@ object BasketGenerator extends App{
   def generate(){
     val config = ConfigFactory.load()
     val actorSystem = ActorSystem("BasketGeneratorSystem", config)
-    val shop = actorSystem.actorOf(Props[Shop], name = "topshop")
+    val integrationLayer = actorSystem.actorOf(Props[RabbitMQIntegration], name="integration")
+    val shop = actorSystem.actorOf(Props(new Shop(integrationLayer)), name = "topshop")
 
     shop ! SimulationStart
   }
@@ -202,8 +190,11 @@ object BasketGenerator extends App{
     val MONGODB_HOST = ConfigFactory.load().getString("basketGenerator.mongodb.host")
     val MONGODB_PORT = ConfigFactory.load().getInt("basketGenerator.mongodb.port")
     val MONGODB_DATABASE = ConfigFactory.load().getString("basketGenerator.mongodb.database")
-    val RABBITMQ_HOST = ConfigFactory.load().getString("basketGenerator.rabbitmq.queue")
-    val RABBITMQ_QNAME = ConfigFactory.load().getString("basketGenerator.rabbitmq.queue")
+    val RABBITMQ_EXCHANGE = ConfigFactory.load().getString("basketGenerator.rabbitmq.exchange")
+    val RABBITMQ_Q_SIMULATION = ConfigFactory.load().getString("basketGenerator.rabbitmq.Q.simulation")
+    val RABBITMQ_Q_BUSINESS = ConfigFactory.load().getString("basketGenerator.rabbitmq.Q.business")
+    val RABBITMQ_ROUTINGKEY_SIMULATION = ConfigFactory.load().getString("basketGenerator.rabbitmq.routingKey.simulation")
+    val RABBITMQ_ROUTINGKEY_BUSINESS = ConfigFactory.load().getString("basketGenerator.rabbitmq.routingKey.business")
     val GENERATOR_NO_OF_AKKA_ACTORS = ConfigFactory.load().getInt("basketGenerator.noOfAkkaActors")
     val GENERATOR_NO_OF_SHOPPERS = ConfigFactory.load().getInt("basketGenerator.noOfShoppers")
     val GENERATOR_REF_DATA_COLLECTION = ConfigFactory.load().getString("basketGenerator.mongodb.referenceDataCollection")
