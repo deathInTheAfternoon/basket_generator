@@ -16,41 +16,52 @@ import scala.util.parsing.json._
 // trait allows a mix of abstract and concrete methods - a mixin which allows implementation reuse.
 sealed trait SimulatorEvent
 //case classes/objects can be used for pattern matching, have compiler generated toString, equality, constructor methods.
-case object SimulationCompleted extends SimulatorEvent
-case object SimulationStarted extends SimulatorEvent
+case class GeneratorEvent(message: Map[String, AnyRef]) extends SimulatorEvent
 case class BusinessEvent(message: Map[String, AnyRef]) extends SimulatorEvent
 
 class RabbitMQIntegration extends Actor with ActorLogging {
 
-
   private[this] var conn: Option[com.rabbitmq.client.Connection] = None
-  private[this] var chan: Option[com.rabbitmq.client.Channel] = None
+  private[this] var businessChannel: Option[com.rabbitmq.client.Channel] = None
+  private[this] var simulationChannel: Option[com.rabbitmq.client.Channel] = None
 
   def receive = {
-    case SimulationStarted =>
-      log.info("Received Simulation Event.")
+    case GeneratorEvent(message) =>
+      publishGeneratorEvent(message)
     case BusinessEvent(message) =>
-      basicPublish(message)
+      publishBusinessEvent(message)
   }
 
-  def basicPublish(message: Map[String, AnyRef]) {
+  private def publishBusinessEvent(message: Map[String, AnyRef]) {
     // We call .toMap to convert from Mutable to Immutable map.
     val builder = new AMQP.BasicProperties.Builder
     // It's important to set the contentType property - otherwise node-amqp will see bytes instead of JSON.
-    chan.get.basicPublish(Config.RABBITMQ_EXCHANGE, Config.RABBITMQ_Q_BUSINESS, builder.contentType("application/json").build(), JSONObject(message).toString().getBytes);
+    businessChannel.get.basicPublish(Config.RABBITMQ_EXCHANGE_BUSINESS, Config.RABBITMQ_Q_BUSINESS, builder.contentType("application/json").build(), JSONObject(message).toString().getBytes);
   }
+
+  private def publishGeneratorEvent(message: Map[String, AnyRef]) {
+    // We call .toMap to convert from Mutable to Immutable map.
+    val builder = new AMQP.BasicProperties.Builder
+    // It's important to set the contentType property - otherwise node-amqp will see bytes instead of JSON.
+    // Note: we publish via the exchange to all Q's so no routing_key required.
+    simulationChannel.get.basicPublish(Config.RABBITMQ_EXCHANGE_SIMULATION, "",
+      builder.contentType("application/json").build(), JSONObject(message).toString().getBytes);
+  }
+
   // Called before Actor starts accepting messages.
   override def preStart() {
 
     // Set up RabbitMQ
     conn = Some(RabbitMQConnection.getConnection())
-    chan = conn map {
-      c => c.createChannel()
-    }
+    businessChannel = conn map { c => c.createChannel() }
+    simulationChannel = conn map { c => c.createChannel() }
 
-    chan.get.exchangeDeclare(Config.RABBITMQ_EXCHANGE, "direct", false)
-    chan.get.queueDeclare(Config.RABBITMQ_Q_BUSINESS, false, false, false, null)
-    chan.get.queueBind(Config.RABBITMQ_Q_BUSINESS, Config.RABBITMQ_EXCHANGE, Config.RABBITMQ_ROUTINGKEY_BUSINESS)
+    //PubSub Q
+    simulationChannel.get.exchangeDeclare(Config.RABBITMQ_EXCHANGE_SIMULATION, "fanout", false)//durable
+    // Competing consumer Q
+    businessChannel.get.exchangeDeclare(Config.RABBITMQ_EXCHANGE_BUSINESS, "direct", false)//durable=false
+    businessChannel.get.queueDeclare(Config.RABBITMQ_Q_BUSINESS, false, false, false, null)//durable, exclusive, auto-delete.
+    businessChannel.get.queueBind(Config.RABBITMQ_Q_BUSINESS, Config.RABBITMQ_EXCHANGE_BUSINESS, Config.RABBITMQ_ROUTINGKEY_BUSINESS)
 
     log.info("Connected to RabbitMQ!")
   }
@@ -58,14 +69,13 @@ class RabbitMQIntegration extends Actor with ActorLogging {
   // Called when Actor terminates, having terminated its children.
   override def postStop() {
     // 'foreach' applies the function to the Options value if its non-empty (!= None).
-
-    //Rabbit
-    log.info("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX")
-    chan foreach (ch => ch.close()) //Good practice! But not necessary if the connection is being closed.
+    businessChannel foreach (ch => ch.close()) //Good practice! But not necessary if the connection is being closed.
+    simulationChannel foreach (ch => ch.close())
     conn foreach (co => co.close())
 
     // Let's be really neat!
-    chan = None
+    businessChannel = None
+    simulationChannel = None
     conn = None
 
   }
@@ -74,10 +84,9 @@ class RabbitMQIntegration extends Actor with ActorLogging {
    * Nice way to encapsulate access to configuration data.
    */
   object Config {
-    val RABBITMQ_EXCHANGE = ConfigFactory.load().getString("basketGenerator.rabbitmq.exchange")
-    val RABBITMQ_Q_SIMULATION = ConfigFactory.load().getString("basketGenerator.rabbitmq.Q.simulation")
+    val RABBITMQ_EXCHANGE_BUSINESS = ConfigFactory.load().getString("basketGenerator.rabbitmq.exchange.business")
+    val RABBITMQ_EXCHANGE_SIMULATION = ConfigFactory.load().getString("basketGenerator.rabbitmq.exchange.simulation")
     val RABBITMQ_Q_BUSINESS = ConfigFactory.load().getString("basketGenerator.rabbitmq.Q.business")
-    val RABBITMQ_ROUTINGKEY_SIMULATION = ConfigFactory.load().getString("basketGenerator.rabbitmq.routingKey.simulation")
     val RABBITMQ_ROUTINGKEY_BUSINESS = ConfigFactory.load().getString("basketGenerator.rabbitmq.routingKey.business")
   }
 }

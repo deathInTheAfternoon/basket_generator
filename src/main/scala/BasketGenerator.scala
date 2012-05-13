@@ -58,7 +58,7 @@ object BasketGenerator extends App{
         val basket = generateBasket(shopperId)
         logsCollection.get.save(basket)// log the basket we're about to Q.
         // RabbitMQ
-        integrationLayer ! BusinessEvent(basket)
+        integrationLayer ! GeneratorEvent(basket)
         log.info(JSONObject(basket).toString())
         // terminate this shopper's stint
         sender ! ShopperDied
@@ -113,7 +113,6 @@ object BasketGenerator extends App{
 
     private[this] var noOfAkkaActors: Int = _
     private[this] var noOfShoppers: Int = _
-    private[this] var routingKeyBusiness: String  = "BGTestQ"
 
     // We round-robin start requests to each Shopper
     private var shopperRouter: Option[ActorRef] = None
@@ -123,7 +122,6 @@ object BasketGenerator extends App{
 
     def receive = {
       case SimulationStart =>
-        log.info("Start simulation of {} Shoppers using {} AkkaActors. Pickup baskets at Q = {}", noOfShoppers, noOfAkkaActors, routingKeyBusiness)
         for (i <- 0 until noOfShoppers) shopperRouter.get ! GoShop(nextASCIIString(20))  // todo: generate shopper id from database
       case ShopperDied =>
         noOfShoppersDied += 1
@@ -145,7 +143,6 @@ object BasketGenerator extends App{
     override def preStart() {
       noOfShoppers = Config.GENERATOR_NO_OF_SHOPPERS
       noOfAkkaActors = Config.GENERATOR_NO_OF_AKKA_ACTORS
-      routingKeyBusiness = Config.RABBITMQ_ROUTINGKEY_BUSINESS
 
       // Set up MongoDB
       mongoConn = Some(MongoConnection(Config.MONGODB_HOST, Config.MONGODB_PORT))
@@ -190,11 +187,7 @@ object BasketGenerator extends App{
     val MONGODB_HOST = ConfigFactory.load().getString("basketGenerator.mongodb.host")
     val MONGODB_PORT = ConfigFactory.load().getInt("basketGenerator.mongodb.port")
     val MONGODB_DATABASE = ConfigFactory.load().getString("basketGenerator.mongodb.database")
-    val RABBITMQ_EXCHANGE = ConfigFactory.load().getString("basketGenerator.rabbitmq.exchange")
-    val RABBITMQ_Q_SIMULATION = ConfigFactory.load().getString("basketGenerator.rabbitmq.Q.simulation")
-    val RABBITMQ_Q_BUSINESS = ConfigFactory.load().getString("basketGenerator.rabbitmq.Q.business")
-    val RABBITMQ_ROUTINGKEY_SIMULATION = ConfigFactory.load().getString("basketGenerator.rabbitmq.routingKey.simulation")
-    val RABBITMQ_ROUTINGKEY_BUSINESS = ConfigFactory.load().getString("basketGenerator.rabbitmq.routingKey.business")
+
     val GENERATOR_NO_OF_AKKA_ACTORS = ConfigFactory.load().getInt("basketGenerator.noOfAkkaActors")
     val GENERATOR_NO_OF_SHOPPERS = ConfigFactory.load().getInt("basketGenerator.noOfShoppers")
     val GENERATOR_REF_DATA_COLLECTION = ConfigFactory.load().getString("basketGenerator.mongodb.referenceDataCollection")
