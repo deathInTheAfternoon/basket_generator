@@ -58,7 +58,7 @@ object BasketGenerator extends App{
         val basket = generateBasket(shopperId)
         logsCollection.get.save(basket)// log the basket we're about to Q.
         // RabbitMQ
-        integrationLayer ! GeneratorEvent(basket)
+        integrationLayer ! BusinessEvent(basket)
         log.info(JSONObject(basket).toString())
         // terminate this shopper's stint
         sender ! ShopperDied
@@ -122,10 +122,12 @@ object BasketGenerator extends App{
 
     def receive = {
       case SimulationStart =>
+        integrationLayer ! GeneratorEvent(Map("description" -> ("Starting Generator at time: " + new Date().toString())))
         for (i <- 0 until noOfShoppers) shopperRouter.get ! GoShop(nextASCIIString(20))  // todo: generate shopper id from database
       case ShopperDied =>
         noOfShoppersDied += 1
         if (noOfShoppersDied == noOfShoppers) {
+          integrationLayer ! GeneratorEvent(Map("description" -> ("Stopping Generator at time: " + new Date().toString())))
           log.info("Finished simulation of {} Shoppers!", noOfShoppers)
           // Ask the 'user' generator to shutdown all its children (including Shop).
           context.system.shutdown()

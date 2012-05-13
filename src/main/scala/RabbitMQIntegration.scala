@@ -16,7 +16,7 @@ import scala.util.parsing.json._
 // trait allows a mix of abstract and concrete methods - a mixin which allows implementation reuse.
 sealed trait SimulatorEvent
 //case classes/objects can be used for pattern matching, have compiler generated toString, equality, constructor methods.
-case class GeneratorEvent(message: Map[String, AnyRef]) extends SimulatorEvent
+case class GeneratorEvent(message: Map[String, String]) extends SimulatorEvent
 case class BusinessEvent(message: Map[String, AnyRef]) extends SimulatorEvent
 
 class RabbitMQIntegration extends Actor with ActorLogging {
@@ -36,14 +36,16 @@ class RabbitMQIntegration extends Actor with ActorLogging {
     // We call .toMap to convert from Mutable to Immutable map.
     val builder = new AMQP.BasicProperties.Builder
     // It's important to set the contentType property - otherwise node-amqp will see bytes instead of JSON.
-    businessChannel.get.basicPublish(Config.RABBITMQ_EXCHANGE_BUSINESS, Config.RABBITMQ_Q_BUSINESS, builder.contentType("application/json").build(), JSONObject(message).toString().getBytes);
+    businessChannel.get.basicPublish(Config.RABBITMQ_EXCHANGE_BUSINESS, Config.RABBITMQ_ROUTINGKEY_BUSINESS,
+      builder.contentType("application/json").build(), JSONObject(message).toString().getBytes);
   }
 
-  private def publishGeneratorEvent(message: Map[String, AnyRef]) {
+  private def publishGeneratorEvent(message: Map[String, String]) {
     // We call .toMap to convert from Mutable to Immutable map.
     val builder = new AMQP.BasicProperties.Builder
     // It's important to set the contentType property - otherwise node-amqp will see bytes instead of JSON.
     // Note: we publish via the exchange to all Q's so no routing_key required.
+    log.info("Sending message: " + JSONObject(message).toString())
     simulationChannel.get.basicPublish(Config.RABBITMQ_EXCHANGE_SIMULATION, "",
       builder.contentType("application/json").build(), JSONObject(message).toString().getBytes);
   }
@@ -60,6 +62,7 @@ class RabbitMQIntegration extends Actor with ActorLogging {
     simulationChannel.get.exchangeDeclare(Config.RABBITMQ_EXCHANGE_SIMULATION, "fanout", false)//durable
     // Competing consumer Q
     businessChannel.get.exchangeDeclare(Config.RABBITMQ_EXCHANGE_BUSINESS, "direct", false)//durable=false
+    // todo: Review settings as per tutorial 2 if you want to ensure tasks aren't lost e.g. durable Q's and persistent messages
     businessChannel.get.queueDeclare(Config.RABBITMQ_Q_BUSINESS, false, false, false, null)//durable, exclusive, auto-delete.
     businessChannel.get.queueBind(Config.RABBITMQ_Q_BUSINESS, Config.RABBITMQ_EXCHANGE_BUSINESS, Config.RABBITMQ_ROUTINGKEY_BUSINESS)
 
