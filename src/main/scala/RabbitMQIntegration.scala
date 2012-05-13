@@ -1,6 +1,6 @@
 import akka.actor.{Props, ActorRef, ActorLogging, Actor}
+import com.rabbitmq.client.{ConnectionFactory, Connection, AMQP, Channel}
 import com.typesafe.config.ConfigFactory
-import com.rabbitmq.client.{AMQP, Channel}
 import scala.util.parsing.json._
 
 /**
@@ -50,6 +50,22 @@ class RabbitMQIntegration extends Actor with ActorLogging {
       builder.contentType("application/json").build(), JSONObject(message).toString().getBytes);
   }
 
+  // This should be shared amongst each instance of IntegrationLayer to avoid expensive activity.
+  object RabbitMQConnection {
+    private val connection: Connection = null;
+
+    def getConnection(): Connection = {
+      connection match {
+        case null => {
+          val factory = new ConnectionFactory()
+          factory.setHost("localhost")
+          factory.newConnection()
+        }
+        case _ => connection
+      }
+    }
+  }
+
   // Called before Actor starts accepting messages.
   override def preStart() {
 
@@ -87,6 +103,7 @@ class RabbitMQIntegration extends Actor with ActorLogging {
    * Nice way to encapsulate access to configuration data.
    */
   object Config {
+    val RABBITMQ_HOST = ConfigFactory.load().getString("basketGenerator.rabbitmq.host")
     val RABBITMQ_EXCHANGE_BUSINESS = ConfigFactory.load().getString("basketGenerator.rabbitmq.exchange.business")
     val RABBITMQ_EXCHANGE_SIMULATION = ConfigFactory.load().getString("basketGenerator.rabbitmq.exchange.simulation")
     val RABBITMQ_Q_BUSINESS = ConfigFactory.load().getString("basketGenerator.rabbitmq.Q.business")
