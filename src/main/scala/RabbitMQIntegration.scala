@@ -46,8 +46,10 @@ class RabbitMQIntegration extends Actor with ActorLogging {
     // It's important to set the contentType property - otherwise node-amqp will see bytes instead of JSON.
     // Note: we publish via the exchange to all Q's so no routing_key required.
     log.info("Sending message: " + JSONObject(message).toString())
+    var headerForCamel = new java.util.HashMap[String, AnyRef]
+    headerForCamel.put("CamelExchangePattern", "InOnly")
     simulationChannel.get.basicPublish(Config.RABBITMQ_EXCHANGE_SIMULATION, "",
-      builder.contentType("application/json").build(), JSONObject(message).toString().getBytes);
+      builder.contentType("application/json").headers(headerForCamel).build(), JSONObject(message).toString().getBytes);
   }
 
   // This should be shared amongst each instance of IntegrationLayer to avoid expensive activity.
