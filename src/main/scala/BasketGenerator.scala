@@ -12,12 +12,14 @@ import collection.mutable.HashMap
 import com.mongodb.casbah.Imports._
 import com.rabbitmq.client.{AMQP, Channel}
 import java.util.Date
+import net.nthakur.model.{EventHeader, Payload, DomainEvent}
 import scala.None
 import scala.Predef._
 import scala.util.parsing.json._
 
 // MongoCollection is MT-safe so can be passed to Workers.
 import com.typesafe.config.ConfigFactory
+import com.nthakur.gateways._
 
 //todo: Add progress Shopper start, stop and overall progress reporting messages for client.
 //todo: Wrap qu stuff in a function object so it's encapsulated and can be called from anywhere. But...do functions have state?
@@ -51,7 +53,7 @@ object BasketGenerator extends App{
    *
    */
   class Shopper(referenceDataCollection: Option[MongoCollection],
-                 noOfSKUs: Int, logsCollection: Option[MongoCollection], integrationLayer: ActorRef) extends Actor with ActorLogging{   //todo: is there a better way to pass noOfSKus and other constants?
+                 noOfSKUs: Int, logsCollection: Option[MongoCollection], integrationLayer: ActorRef, emmissionsLayer: ActorRef) extends Actor with ActorLogging{   //todo: is there a better way to pass noOfSKus and other constants?
 
     def receive = {
       case GoShop(shopperId) =>
@@ -59,11 +61,17 @@ object BasketGenerator extends App{
         logsCollection.get.save(basket)// log the basket we're about to Q.
         // RabbitMQ
         integrationLayer ! BusinessEvent(basket)
+        emmissionsLayer ! convertToDomainEvent(basket)
         log.info(JSONObject(basket).toString())
         // terminate this shopper's stint
         sender ! ShopperDied
     }
 
+    private def convertToDomainEvent(payload: Map[String, AnyRef]): DomainEvent = {
+      val eh: EventHeader = new EventHeader("PosEvent", "123456789", "BasketGenerator")
+      val p: Payload = new Payload(JSONObject(payload).toString())
+      new DomainEvent(eh, p)
+    }
     /** Generates a randomised basket of shopping.
      * This method generates a basket of shopping with a random number of items and a random selection of products. It
      * assumes the data source contains SKUs with a seqId: Int. The seqId is used to lookup a SKU given a random number.
@@ -105,7 +113,7 @@ object BasketGenerator extends App{
    *
    **/
 
-  class Shop(integrationLayer: ActorRef) extends Actor with ActorLogging {
+  class Shop(integrationLayer: ActorRef, emissionsLayer: ActorRef) extends Actor with ActorLogging {
     private[this] var mongoConn: Option[MongoConnection] = None
     private[this] var db: Option[MongoDB] = None
     private[this] var referenceDataCollection: Option[MongoCollection] = None
@@ -160,7 +168,7 @@ object BasketGenerator extends App{
       // capture total number of SKUs.
       noOfSKUs = referenceDataCollection.get.find(MongoDBObject("domainRefType" -> "SKU")).count
 
-      shopperRouter = Some(context.actorOf(Props(new Shopper(referenceDataCollection, noOfSKUs, logsCollection, integrationLayer)).withRouter(RoundRobinRouter(noOfAkkaActors)), name = "shopperRouter"))
+      shopperRouter = Some(context.actorOf(Props(new Shopper(referenceDataCollection, noOfSKUs, logsCollection, integrationLayer, emissionsLayer)).withRouter(RoundRobinRouter(noOfAkkaActors)), name = "shopperRouter"))
     }
     // Called when Actor terminates, having terminated its children.
     override def postStop() {
@@ -174,10 +182,13 @@ object BasketGenerator extends App{
   }
 
   def generate(){
-    val config = ConfigFactory.load()
-    val actorSystem = ActorSystem("BasketGeneratorSystem", config)
+    val actorSystem = ActorSystem("BasketGeneratorSystem", ConfigFactory.load())
     val integrationLayer = actorSystem.actorOf(Props[RabbitMQIntegration], name="integration")
-    val shop = actorSystem.actorOf(Props(new Shop(integrationLayer)), name = "topshop")
+    // todo: This will replace RabbitMQIntegration class
+    val emmissionsLayer = actorSystem.actorOf(Props[Emitter])
+    // test it speaks
+    emmissionsLayer ! new DomainEvent(new EventHeader("pos event", "2123", "test"), new Payload("a message of an event"))
+    val shop = actorSystem.actorOf(Props(new Shop(integrationLayer, emmissionsLayer)), name = "topshop")
 
     shop ! SimulationStart
   }
