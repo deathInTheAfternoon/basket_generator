@@ -19,11 +19,11 @@ import java.io.{ByteArrayOutputStream}
  */
 
 /**
- * Emit events into the ether.
+ * Emit Domain Events into the ether.
  */
-class Emitter extends Actor with Producer with Oneway {
+class DomainEventEmitter extends Actor with Producer with Oneway {
   //todo: untested
-  def endpointUri = Config.EMITTER_ENDPOINT_URI
+  def endpointUri = "spring-amqp:emissionX:PosRK?type=direct"
 
   //This method is called by akka-camel before a Message is sent via the endpointUri.
   override def transformOutgoingMessage(msg: Any): Any = {
@@ -55,7 +55,41 @@ class Emitter extends Actor with Producer with Oneway {
   }
 }
 
+class GeneratorEventEmitter extends Actor with Producer with Oneway {
+  //todo: untested
+  def endpointUri = "spring-amqp:SimulationX:tempQ?type=fanout&autodelete=false"
+
+  //This method is called by akka-camel before a Message is sent via the endpointUri.
+  override def transformOutgoingMessage(msg: Any): Any = {
+    //msg has been sent to this Actor via ! operator. The call site is within the Producer trait 'receive' method.
+    msg
+  }
+
+  private def convertToAvroByteArray(event: DomainEvent): Array[Byte] = {
+    // This should be done using annotations and reflection!
+    val domainEventAvro: DomainEventAvro = DomainEventAvro.newBuilder()
+      .setHeader(HeaderAvro.newBuilder()
+      .setEventType(event.header.eventType)
+      .setInstanceId(event.header.instanceId)
+      .setSource(event.header.source)
+      .setOccurrenceTime(event.header.occurrenceTime.getMillis)
+      .setDetectionTime(event.header.detectionTime.getMillis)
+      .build())
+      .setPayload(event.payload.contents)
+      .build()
+
+    val bos: java.io.ByteArrayOutputStream = new ByteArrayOutputStream
+    val writer: GenericDatumWriter[DomainEventAvro] = new GenericDatumWriter[DomainEventAvro](DomainEventAvro.SCHEMA$)
+    val encoder: Encoder = EncoderFactory.get().binaryEncoder(bos, null)
+
+    writer.write(domainEventAvro, encoder)
+    encoder.flush()
+    bos.toByteArray
+  }
+}
+
 
 object Config {
   val EMITTER_ENDPOINT_URI = ConfigFactory.load().getString("basketGenerator.emitter.amqp.uri")
+  val GENERATOR_ENDPOINT_URI = ConfigFactory.load().getString("basketGenerator.generator.uri")
 }

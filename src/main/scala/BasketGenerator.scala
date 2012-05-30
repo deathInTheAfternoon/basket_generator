@@ -59,8 +59,6 @@ object BasketGenerator extends App{
       case GoShop(shopperId) =>
         val basket = generateBasket(shopperId)
         logsCollection.get.save(basket)// log the basket we're about to Q.
-        // RabbitMQ
-        integrationLayer ! BusinessEvent(basket)
         emmissionsLayer ! convertToDomainEvent(basket)
         log.info(JSONObject(basket).toString())
         // terminate this shopper's stint
@@ -113,7 +111,7 @@ object BasketGenerator extends App{
    *
    **/
 
-  class Shop(integrationLayer: ActorRef, emissionsLayer: ActorRef) extends Actor with ActorLogging {
+  class Shop(generatorEventEmitter: ActorRef, emissionsLayer: ActorRef) extends Actor with ActorLogging {
     private[this] var mongoConn: Option[MongoConnection] = None
     private[this] var db: Option[MongoDB] = None
     private[this] var referenceDataCollection: Option[MongoCollection] = None
@@ -130,12 +128,12 @@ object BasketGenerator extends App{
 
     def receive = {
       case SimulationStart =>
-        integrationLayer ! GeneratorEvent(Map("description" -> ("Starting Generator at time: " + new Date().toString())))
+        generatorEventEmitter ! GeneratorEvent(Map("description" -> ("Starting Generator at time: " + new Date().toString()))).toString
         for (i <- 0 until noOfShoppers) shopperRouter.get ! GoShop(nextASCIIString(20))  // todo: generate shopper id from database
       case ShopperDied =>
         noOfShoppersDied += 1
         if (noOfShoppersDied == noOfShoppers) {
-          integrationLayer ! GeneratorEvent(Map("description" -> ("Stopping Generator at time: " + new Date().toString())))
+          generatorEventEmitter ! GeneratorEvent(Map("description" -> ("Stopping Generator at time: " + new Date().toString()))).toString
           log.info("Finished simulation of {} Shoppers!", noOfShoppers)
           // Ask the 'user' generator to shutdown all its children (including Shop).
           context.system.shutdown()
@@ -168,7 +166,7 @@ object BasketGenerator extends App{
       // capture total number of SKUs.
       noOfSKUs = referenceDataCollection.get.find(MongoDBObject("domainRefType" -> "SKU")).count
 
-      shopperRouter = Some(context.actorOf(Props(new Shopper(referenceDataCollection, noOfSKUs, logsCollection, integrationLayer, emissionsLayer)).withRouter(RoundRobinRouter(noOfAkkaActors)), name = "shopperRouter"))
+      shopperRouter = Some(context.actorOf(Props(new Shopper(referenceDataCollection, noOfSKUs, logsCollection, generatorEventEmitter, emissionsLayer)).withRouter(RoundRobinRouter(noOfAkkaActors)), name = "shopperRouter"))
     }
     // Called when Actor terminates, having terminated its children.
     override def postStop() {
@@ -183,12 +181,12 @@ object BasketGenerator extends App{
 
   def generate(){
     val actorSystem = ActorSystem("BasketGeneratorSystem", ConfigFactory.load())
-    val integrationLayer = actorSystem.actorOf(Props[RabbitMQIntegration], name="integration")
     // todo: This will replace RabbitMQIntegration class
-    val emmissionsLayer = actorSystem.actorOf(Props[Emitter])
+    val domainEventEmitter = actorSystem.actorOf(Props[DomainEventEmitter])
+    val generatorEventEmitter = actorSystem.actorOf(Props[GeneratorEventEmitter])
     // test it speaks
-    emmissionsLayer ! new DomainEvent(new EventHeader("pos event", "2123", "test"), new Payload("a message of an event"))
-    val shop = actorSystem.actorOf(Props(new Shop(integrationLayer, emmissionsLayer)), name = "topshop")
+    domainEventEmitter ! new DomainEvent(new EventHeader("pos event", "2123", "test"), new Payload("a message of an event"))
+    val shop = actorSystem.actorOf(Props(new Shop(generatorEventEmitter, domainEventEmitter)), name = "topshop")
 
     shop ! SimulationStart
   }
