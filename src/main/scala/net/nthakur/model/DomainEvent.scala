@@ -18,3 +18,5 @@ case class EventHeader(eventType: String, instanceId: String, source: String,
 case class Payload(contents: String) // a JSON String.
 case class DomainEvent(header: EventHeader, payload: Payload)
 
+case class GeneratorEvent(message: Map[String, String])
+

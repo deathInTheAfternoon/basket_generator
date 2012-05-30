@@ -12,7 +12,7 @@ import collection.mutable.HashMap
 import com.mongodb.casbah.Imports._
 import com.rabbitmq.client.{AMQP, Channel}
 import java.util.Date
-import net.nthakur.model.{EventHeader, Payload, DomainEvent}
+import net.nthakur.model.{GeneratorEvent, EventHeader, Payload, DomainEvent}
 import scala.None
 import scala.Predef._
 import scala.util.parsing.json._
