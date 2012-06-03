@@ -1,14 +1,15 @@
 package com.nthakur.gateways
 
 import akka.actor.Actor
-import akka.camel.Producer
-import akka.camel.Oneway
 import com.typesafe.config.ConfigFactory
 import net.nthakur.model.DomainEvent
 import dummy.avro.{HeaderAvro, DomainEventAvro}
 import org.apache.avro.generic.GenericDatumWriter
 import org.apache.avro.io.{EncoderFactory, Encoder}
 import java.io.{ByteArrayOutputStream}
+import amqp.spring.camel.component.SpringAMQPComponent
+import org.springframework.amqp.rabbit.connection.CachingConnectionFactory
+import akka.camel.{CamelExtension, Producer, Oneway}
 
 /**
  * Created under license Apache 2.0
@@ -27,8 +28,8 @@ class DomainEventEmitter extends Actor with Producer with Oneway {
 
   //This method is called by akka-camel before a Message is sent via the endpointUri.
   override def transformOutgoingMessage(msg: Any): Any = {
+    println("SENDING msg = " + msg)
     //msg has been sent to this Actor via ! operator. The call site is within the Producer trait 'receive' method.
-    //todo: Avro magic on msg which is a DomainEvent: 1. implict converstion to DomainEventAvro. 2. DomainEventAvro -> byte[] 3. byte[] -> Rabbit.
     convertToAvroByteArray(msg.asInstanceOf[DomainEvent])
   }
 
@@ -51,7 +52,17 @@ class DomainEventEmitter extends Actor with Producer with Oneway {
 
     writer.write(domainEventAvro, encoder)
     encoder.flush()
-    bos.toByteArray
+    try{bos.toByteArray} finally{bos.close()}
+  }
+
+  override def postStop(){
+    println("SHUTTING DOWN THIS ACTORXXX")
+/*    val cc = CamelExtension(context.system).context
+    val cmp: SpringAMQPComponent = cc.getComponent("spring-amqp").asInstanceOf[SpringAMQPComponent]
+    val cf = cmp.getConnectionFactory.asInstanceOf[CachingConnectionFactory]
+    cf.destroy()*/
+    //cc.stop()
+    println("Here to serve")
   }
 }
 
@@ -84,7 +95,17 @@ class GeneratorEventEmitter extends Actor with Producer with Oneway {
 
     writer.write(domainEventAvro, encoder)
     encoder.flush()
-    bos.toByteArray
+    try{bos.toByteArray} finally{bos.close()}
+  }
+
+  override def postStop(){
+    println("SHUTTING DOWN THIS ACTOR TOO.")
+/*    val cc = CamelExtension(context.system).context
+    val cmp: SpringAMQPComponent = cc.getComponent("spring-amqp").asInstanceOf[SpringAMQPComponent]
+    val cf = cmp.getConnectionFactory.asInstanceOf[CachingConnectionFactory]
+    cf.destroy()*/
+    //cc.stop()
+    println("Here to serve")
   }
 }
 

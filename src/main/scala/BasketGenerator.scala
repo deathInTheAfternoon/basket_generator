@@ -7,12 +7,14 @@
  */
 
 import akka.actor._
+import akka.camel.CamelExtension
 import akka.routing.RoundRobinRouter
+import amqp.spring.camel.component.SpringAMQPComponent
 import collection.mutable.HashMap
 import com.mongodb.casbah.Imports._
-import com.rabbitmq.client.{AMQP, Channel}
 import java.util.Date
 import net.nthakur.model.{GeneratorEvent, EventHeader, Payload, DomainEvent}
+import org.springframework.amqp.rabbit.connection.CachingConnectionFactory
 import scala.None
 import scala.Predef._
 import scala.util.parsing.json._
@@ -53,13 +55,13 @@ object BasketGenerator extends App{
    *
    */
   class Shopper(referenceDataCollection: Option[MongoCollection],
-                 noOfSKUs: Int, logsCollection: Option[MongoCollection], integrationLayer: ActorRef, emmissionsLayer: ActorRef) extends Actor with ActorLogging{   //todo: is there a better way to pass noOfSKus and other constants?
+                 noOfSKUs: Int, logsCollection: Option[MongoCollection] , generatorEventEmitter: ActorRef, domainEventEmitter: ActorRef) extends Actor with ActorLogging{   //todo: is there a better way to pass noOfSKus and other constants?
 
     def receive = {
       case GoShop(shopperId) =>
         val basket = generateBasket(shopperId)
         logsCollection.get.save(basket)// log the basket we're about to Q.
-        emmissionsLayer ! convertToDomainEvent(basket)
+        domainEventEmitter ! convertToDomainEvent(basket)
         log.info(JSONObject(basket).toString())
         // terminate this shopper's stint
         sender ! ShopperDied
@@ -78,6 +80,7 @@ object BasketGenerator extends App{
      * @return A map of skuId->descriptions as well as id->forShopper - in no particular order.
      */
     def generateBasket(forShopper: String): Map[String, AnyRef] = {
+      println("GENERATING A BASKET FOR shopper  " + forShopper)
       // Building query: { sku: {$in: [sku1,...skuN } }, where N is random number
       // generating random N between 1 and 5.
       val N = util.Random.nextInt(5)
@@ -111,7 +114,7 @@ object BasketGenerator extends App{
    *
    **/
 
-  class Shop(generatorEventEmitter: ActorRef, emissionsLayer: ActorRef) extends Actor with ActorLogging {
+  class Shop(/*generatorEventEmitter: ActorRef,*/ /*emissionsLayer: ActorRef*/) extends Actor with ActorLogging {
     private[this] var mongoConn: Option[MongoConnection] = None
     private[this] var db: Option[MongoDB] = None
     private[this] var referenceDataCollection: Option[MongoCollection] = None
@@ -125,7 +128,10 @@ object BasketGenerator extends App{
     // Count number of shopper's leaving the store.
     var noOfShoppersDied: Int = _
     var noOfSKUs: Int = _ // range for random numbers used to generate skus.
-
+    //test
+    val domainEventEmitter = context.actorOf(Props[DomainEventEmitter], "DomainEventEmitterActor")
+    val generatorEventEmitter = context.actorOf(Props[GeneratorEventEmitter], "GeneratorEventEmitterActor")
+    // end test
     def receive = {
       case SimulationStart =>
         generatorEventEmitter ! GeneratorEvent(Map("description" -> ("Starting Generator at time: " + new Date().toString()))).toString
@@ -136,6 +142,9 @@ object BasketGenerator extends App{
           generatorEventEmitter ! GeneratorEvent(Map("description" -> ("Stopping Generator at time: " + new Date().toString()))).toString
           log.info("Finished simulation of {} Shoppers!", noOfShoppers)
           // Ask the 'user' generator to shutdown all its children (including Shop).
+          //todo: A HACK to allow the Domain emitter to finish munching its Q.
+          // don't call shutdown till Producers have finished.
+          //Thread.sleep(2000)
           context.system.shutdown()
         }
     }
@@ -166,7 +175,7 @@ object BasketGenerator extends App{
       // capture total number of SKUs.
       noOfSKUs = referenceDataCollection.get.find(MongoDBObject("domainRefType" -> "SKU")).count
 
-      shopperRouter = Some(context.actorOf(Props(new Shopper(referenceDataCollection, noOfSKUs, logsCollection, generatorEventEmitter, emissionsLayer)).withRouter(RoundRobinRouter(noOfAkkaActors)), name = "shopperRouter"))
+      shopperRouter = Some(context.actorOf(Props(new Shopper(referenceDataCollection, noOfSKUs, logsCollection , generatorEventEmitter, domainEventEmitter)).withRouter(RoundRobinRouter(noOfAkkaActors)), name = "shopperRouter"))
     }
     // Called when Actor terminates, having terminated its children.
     override def postStop() {
@@ -176,24 +185,25 @@ object BasketGenerator extends App{
       mongoConn foreach(c => c.close())
       // Let's be really neat!
       mongoConn = None
+
+      val cc = CamelExtension(context.system).context
+      val cmp: SpringAMQPComponent = cc.getComponent("spring-amqp").asInstanceOf[SpringAMQPComponent]
+      val cf = cmp.getConnectionFactory.asInstanceOf[CachingConnectionFactory]
+      cf.destroy()
     }
   }
 
   def generate(){
     val actorSystem = ActorSystem("BasketGeneratorSystem", ConfigFactory.load())
     // todo: This will replace RabbitMQIntegration class
-    val domainEventEmitter = actorSystem.actorOf(Props[DomainEventEmitter])
-    val generatorEventEmitter = actorSystem.actorOf(Props[GeneratorEventEmitter])
-    // test it speaks
-    domainEventEmitter ! new DomainEvent(new EventHeader("pos event", "2123", "test"), new Payload("a message of an event"))
-    val shop = actorSystem.actorOf(Props(new Shop(generatorEventEmitter, domainEventEmitter)), name = "topshop")
+    //val domainEventEmitter = actorSystem.actorOf(Props[DomainEventEmitter], "DomainEventEmitterActor")
+    //val generatorEventEmitter = actorSystem.actorOf(Props[GeneratorEventEmitter], "GeneratorEventEmitterActor")
+    val shop = actorSystem.actorOf(Props(new Shop(/*generatorEventEmitter,*/ /*domainEventEmitter*/)), name = "topshop")
 
     shop ! SimulationStart
+
   }
 
-  /**
-   * Nice way to encapsulate access to configuration data.
-   */
   object Config {
     val MONGODB_HOST = ConfigFactory.load().getString("basketGenerator.mongodb.host")
     val MONGODB_PORT = ConfigFactory.load().getInt("basketGenerator.mongodb.port")
